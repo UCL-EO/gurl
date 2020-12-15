@@ -61,16 +61,6 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
 
   Keywords:
     
-  suffix_value
-  ------------
-  If suffix_value is set to a string (e.g. ".store") then this 
-  is appended to the cached filename. This can be useful for
-  distinguishing cached files from other types.
-
-  suffix_value=None : If suffix_value is set to a string (e.g. ".store")
-                      then this is appended to the cached filename. 
-                      This can be useful for distinguishing cached files 
-                      from other types.
   verbose=True      : verbose switch
   log=None          : set to string to send verboise output to file
   pwr=False         : password required (pwr). Sewt to True is the URL
@@ -143,13 +133,6 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     if 'local_dir' not in self.__dict__:
       self.local_dir = Path('.')
     self.local_file = Path(self.local_dir,self.components[2][1:])
-
-    if ('suffix_value' in self.__dict__) and \
-        (type(self.suffix_value) is str) and \
-        (self.local_file) and \
-        (self.local_file.name.find(self.suffix_value) < 0):
-      self.local_file = \
-        Path(self.local_file.as_posix() + self.suffix_value)
     self.local_file = self.local_file.absolute()
 
     if self.pwr:
@@ -174,12 +157,43 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
   def stat(self):
     '''
     Return the result of the stat() system call on the local
-    file for this path, like os.stat() does.
+    file for this path, like os.stat() does. 
+
+    If the file doesnt exist, then we also try appending
+    index.html on the end to see if that exists (in case we request
+    a directory, in which case it is cached as index.html)
     '''
     if self.local_file.exists():
+      if self.local_file.is_dir():
+        # maybe its index.html??
+        try_file = Path(self.local_file,"index.html")
+        if try_file.exists() and try_file.is_file():
+          self.binary = False
+          if (self.suffix != ".html") and \
+             (self.suffix != ".htm"):
+            self.local_file = Path(self.local_file,"index.html")
+          self.update()
       return self.local_file.stat()
     else:
       return Zerostat(0)
+
+  def set_directory(self,r):
+    '''
+    If the url is to a httpd/unix-directory object
+    then set the type as text and set the local filename
+    as index.html. This avoids problems with the cache
+    structure.
+
+    '''
+    self.content_type = r.headers['Content-Type']
+    self.msg(f"content type: {self.content_type}")
+    if (self.content_type == 'httpd/unix-directory') or \
+       (self.content_type.split(';')[0] == 'text/html'):
+      self.binary = False
+      if (self.suffix != ".html") and \
+         (self.suffix != ".htm"):
+        self.local_file = Path(self.local_file,"index.html")
+      self.update()
 
   def get_data_without_login(self):
     '''
@@ -192,6 +206,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     r = self.get()
     self.msg(f'get(): requests.Response code {r.status_code}')
     if r.status_code == 200:
+      self.set_directory(r)
       self.msg(f'retrieving content')
       if self.binary:
         data = r.content
@@ -311,6 +326,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
       try:
         r = session.request('get',str(self))
         if r.status_code == 200:
+          self.set_directory(r)
           self.msg(f'data read get request from {self.anchor}')
           if self.binary:
             data = r.content
@@ -344,6 +360,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
 
         if r.status_code == 200:
           if type(r) == requests.models.Response:
+            self.set_directory(r)
             self.msg(f'sucessful response with get() from {self.anchor}')
             if self.binary:
               data = r.content
@@ -399,6 +416,29 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
         pass
     # reset everything if we change the cache file
     self.update()
+
+    def flatten_list(self,_2d_list):
+        '''
+        based on
+        https://stackabuse.com/python-how-to-flatten-list-of-lists/
+        '''
+        flat_list = []
+        # Iterate through the outer list
+        if type(_2d_list) is str:
+            return self.flatten_list([_2d_list])
+        for element in _2d_list:
+            if type(element) is list:
+                # If the element is of type list, iterate through the sublist
+                for item in element:
+                    if type(item) is str:
+                        item = [item]
+                    if type(item) is list:
+                        flat_list.extend(self.flatten_list(item))
+                    else:
+                        flat_list.append(item)
+            else:
+                flat_list.append(element)
+        return flat_list
 
 def main():
   u='https://e4ftl01.cr.usgs.gov/MOTA/MCD15A3H.006/2003.12.11/MCD15A3H.A2003345.h09v06.006.2015084002115.hdf'
