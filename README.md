@@ -3,7 +3,7 @@ gurl
 
 general URL class, with caching. 
 
-class URL(urlpath.URL, urllib.parse._NetlocResultMixinStr, pathlib.PurePath)
+    class URL(urlpath.URL, urllib.parse._NetlocResultMixinStr, pathlib.PurePath)
      URL(*args, **kwargs)
      
      Derived from 
