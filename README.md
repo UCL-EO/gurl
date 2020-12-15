@@ -1,7 +1,7 @@
 gurl
 ====
 
-general URL class. 
+general URL class, with caching. 
 
 class URL(urlpath.URL, urllib.parse._NetlocResultMixinStr, pathlib.PurePath)
      URL(*args, **kwargs)
@@ -28,7 +28,7 @@ class URL(urlpath.URL, urllib.parse._NetlocResultMixinStr, pathlib.PurePath)
                          from other types.
      verbose=True      : verbose switch
      log=None          : set to string to send verboise output to file
-     pwr=False         : password required (pwr). Sewt to True is the URL
+     pwr=False         : password required (pwr). Set to True is the URL
                          requires username and password. You can then either
                          set 
      
