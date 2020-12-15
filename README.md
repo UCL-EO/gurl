@@ -272,7 +272,7 @@ class URL(urlpath.URL, urllib.parse._NetlocResultMixinStr, pathlib.PurePath)
      path
          The path of url, it's with trailing sep.
      
-|  query
+     query
          The query of url.
      
      scheme
