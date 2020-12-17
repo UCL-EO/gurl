@@ -9,11 +9,13 @@ import urllib
 from pathlib import PosixPath, _PosixFlavour, PurePath
 from pathlib import Path
 from cylog import Cylog
-
+from gurl.list_file import ListPath
 import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 import io
+import numpy as np
+import os
 
 '''
 class derived from urlpath to provide pathlib-like
@@ -57,10 +59,21 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
   to provide more compatibility with pathlib.Path functionality
 
   If a request is made to access the URL read_bytes() or read_text()
-  and self.cache is True, then self.local_file is used as a cache
+  and self.cache is True, then self.local_file_* is used as a cache.
+
+  The cache is defined relative to self.local_dir (ListPath, a list of Paths)
+  The reason this is a list is to allow the concept of some global
+  cache database (where the user might not have write permission, but will 
+  have read permission). So, the cache filename may be different
+  for read and write. Because of this, the cache i
+  mechanism allows for two concepts of self.local_file:
+  - self.local_file (read)  and 
+  - self.local_file_write (write)
+  These may of course be the same in some cases.
 
   Keywords:
-    
+   
+  ofile=filename    : filename to save downloaded URL to 
   verbose=True      : verbose switch
   log=None          : set to string to send verboise output to file
   pwr=False         : password required (pwr). Sewt to True is the URL
@@ -78,8 +91,10 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
                       that behaviour by setting pwr=None. 
   binary=False      : Set to true if you want to retrieve a binary file.
   cache=False       : Set to True if you want to cache any retrieved 
-                      results. The cached filename is self.local_file
-  local_dir="."     : Set the name of the root directory for cached
+                      results. The cached filename is self.local_file (read)
+                      or self.local_file_write (write)
+  local_dir=ListPath(".")     
+                    : Set the name of the root directory for cached
                       files. The default is ".".
                       self.local_file is derived from this, being the
                       local_dir followed by the URL filename path.     
@@ -109,6 +124,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
 
   def __del__(self):
     if 'log' in self.__dict__:
+      # close the open log file
       del self.stderr  
 
   def init(self,*args,**kwargs):
@@ -130,14 +146,64 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
       self.binary = False
     if 'cache' not in self.__dict__:
       self.cache = False
-    if 'local_dir' not in self.__dict__:
-      self.local_dir = Path('.')
-    self.local_file = Path(self.local_dir,self.components[2][1:])
-    self.local_file = self.local_file.absolute()
+
+    if 'ofile' in self.__dict__:
+      self.local_dir = Path(self.ofile).parent
+      self.local_file,self.local_file_write = \
+                       Path(self.ofile),Path(self.ofile)
+    elif self.cache:
+      if 'local_dir' not in self.__dict__:
+        self.local_dir = '.'
+      self.local_dir = self.sort_local_dir()
+      self.local_file,self.local_file_write = self.sort_local_file()
 
     if self.pwr:
       self.login()
-    self.update()
+    if ('ofile' in self.__dict__) or self.cache:
+      self.save = True
+      self.update()
+    else:
+      self.save = False
+
+
+  def sort_local_dir(self):
+    '''
+    deal with mechanics of local_dir
+    '''
+    if ('CACHE_FILE' in os.environ):
+      local_dir = ListPath([os.environ['CACHE_FILE'],\
+                                  list(self.local_dir)])
+    else:
+      local_dir =  ListPath(self.local_dir)
+    return ListPath(local_dir)   
+ 
+  def sort_local_file(self):
+    '''
+    deal with mechanics of local_file
+    '''
+    # consider possible cache files
+    # some will be readable, some writeable
+    local_files = ListPath([l.joinpath(self.components[2][1:]).absolute()
+                            for l in self.local_dir])
+
+    try:
+      local_file_write = np.array(local_files)[local_files.write][0]
+    except:
+      local_file_write = None
+
+    if local_file_write is None:
+      # try parent
+      try:
+        local_file_write = np.array(local_files)[local_files.parentwrite][0]
+      except:
+        local_file_write = None
+
+    try:
+      local_file_read = np.array(local_files)[local_files.read][0]
+    except:
+      local_file_read = local_file_write
+
+    return local_file_read,local_file_write
 
   def login(self):
     if not (self.username and self.password):
@@ -150,9 +216,9 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     return self._username,self._password
 
   def update(self):
-    st_mode = self.stat().st_mode
-    self.readable = bool((st_mode & stat.S_IRUSR) /stat.S_IRUSR )
-    self.writeable = bool((st_mode & stat.S_IWUSR) /stat.S_IWUSR )
+    stat_read,stat_write = self.stat()
+    self.readable = bool((stat_read.st_mode & stat.S_IRUSR) /stat.S_IRUSR )
+    self.writeable = bool((stat_write.st_mode & stat.S_IWUSR) /stat.S_IWUSR )
 
   def stat(self):
     '''
@@ -163,6 +229,10 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     index.html on the end to see if that exists (in case we request
     a directory, in which case it is cached as index.html)
     '''
+    s1,s2 = Zerostat(0),Zerostat(0)
+
+    if 'local_file' not in self.__dict__:
+      return s1,s2
     if self.local_file.exists():
       if self.local_file.is_dir():
         # maybe its index.html??
@@ -173,9 +243,21 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
              (self.suffix != ".htm"):
             self.local_file = Path(self.local_file,"index.html")
           self.update()
-      return self.local_file.stat()
-    else:
-      return Zerostat(0)
+      s1 = self.local_file.stat()
+
+    if self.local_file_write.exists():
+      if self.local_file_write.is_dir():
+        # maybe its index.html??
+        try_file = Path(self.local_file_write,"index.html")
+        if try_file.exists() and try_file.is_file():
+          self.binary = False
+          if (self.suffix != ".html") and \
+             (self.suffix != ".htm"):
+            self.local_file_write = Path(self.local_file_write,"index.html")
+          self.update()
+      s2 =  self.local_file_write.stat()
+
+    return s1,s2
 
   def set_directory(self,r):
     '''
@@ -192,8 +274,10 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
       self.binary = False
       if (self.suffix != ".html") and \
          (self.suffix != ".htm"):
-        self.local_file = Path(self.local_file,"index.html")
-      self.update()
+        if self.save:
+          self.local_file = Path(self.local_file,"index.html")
+      if self.save:
+        self.update()
 
   def get_data_without_login(self):
     '''
@@ -284,23 +368,34 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
       self.msg("done")
     return data
 
-  def write(self,data,local=True):
+  def write(self,data,local=True,ofile=None):
     '''
     Write data to local file if local=True
+
+    Output filename can be set from ofile keyword
+    otherwise it is self.local_file_write
     '''
+    if ('local_file_write' not in self.__dict__) and (ofile == None):
+      self.msg(f'cannot write: no ofile or cache (local_dir) defined')
+      return ''
+
+    if ofile is None:
+      ofile = self.local_file_write
+ 
     if local and data:
-      self.msg(f'writing data to cache file {self.local_file.as_posix()}')
+      self.msg(f'writing data to cache file {ofile.as_posix()}')
       try:
-        self.local_file.parent.mkdir(parents=True,exist_ok=True)
+        ofile.parent.mkdir(parents=True,exist_ok=True)
         if self.binary:
-          self.local_file.write_bytes(data)
+          ofile.write_bytes(data)
         else:
-          self.local_file.write_text(data)
+          ofile.write_text(data)
         # reset everything if we change the cache file
         if self.cache:
           self.update()
       except:
-        self.msg(f"unable to save file {self.local_file.as_posix()}")
+        self.msg(f"unable to save file {ofile.as_posix()}")
+        self.msg(f'data: type: {type(data)}; binary? {self.binary}')
         return ''
 
     if data == None:
@@ -389,7 +484,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     if self.verbose:
       print('>>>>',*args,file=stderr)
 
-  def write_bytes(self,data):
+  def write_bytes(self,data,ofile=None):
     '''
     Open the URL as local file in bytes mode, write it, and close the file.
     '''
@@ -397,7 +492,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
       self.init(binary=True)
     return len(self.write(data,local=True))
  
-  def write_text(self,data):
+  def write_text(self,data,ofile=None):
     '''
     Open the URL as local file in text mode, write it, and close the file.
     '''
@@ -414,48 +509,47 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
         self.local_file.unlink()
       except:
         pass
+    if self.cache and self.local_file_write.exists():
+      try:
+        self.local_file_write.unlink()
+      except:
+        pass
     # reset everything if we change the cache file
     self.update()
 
-    def flatten_list(self,_2d_list):
-        '''
-        based on
-        https://stackabuse.com/python-how-to-flatten-list-of-lists/
-        '''
-        flat_list = []
-        # Iterate through the outer list
-        if type(_2d_list) is str:
-            return self.flatten_list([_2d_list])
-        for element in _2d_list:
-            if type(element) is list:
-                # If the element is of type list, iterate through the sublist
-                for item in element:
-                    if type(item) is str:
-                        item = [item]
-                    if type(item) is list:
-                        flat_list.extend(self.flatten_list(item))
-                    else:
-                        flat_list.append(item)
-            else:
-                flat_list.append(element)
-        return flat_list
-
 def main():
+  print('test 3: defaults, read hdf')
   u='https://e4ftl01.cr.usgs.gov/MOTA/MCD15A3H.006/2003.12.11/MCD15A3H.A2003345.h09v06.006.2015084002115.hdf'
   url = URL(u)
   data = url.read_bytes()
   assert len(data) == 3365255
   print('passed 1')
 
+  print('test 2: cache, password required, read hdf')
   url = URL(u,cache=True,pwr=True,binary=True)
   data = url.read_bytes()
   assert len(data) == 3365255
   print('passed 2')
 
+  print('test 3: no cache, password required, read hdf')
   url = URL(u,pwr=True,binary=True)
   data = url.read_bytes()
   assert len(data) == 3365255
   print('passed 3')
+
+  print('test 4: no cache, password required, read html')
+  u='https://e4ftl01.cr.usgs.gov/MOTA/MCD15A3H.006/2003.12.11/'
+  url = URL(u,pwr=True)
+  data = url.read_text()
+  assert len(data) == 210369
+  print('passed 4')
+
+  print('test 5: no cache, password required, read html')
+  u='https://e4ftl01.cr.usgs.gov/MOTA/MCD15A3H.006/'
+  url = URL(u,pwr=True)
+  data = url.read_text()
+  assert len(data) == 200239
+  print('passed 5')
 
 
 if __name__ == "__main__":
