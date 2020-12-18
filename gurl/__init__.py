@@ -16,7 +16,6 @@ from bs4 import BeautifulSoup
 import io
 import numpy as np
 import os
-
 '''
 class derived from urlpath to provide pathlib-like
 interface to url data
@@ -36,7 +35,7 @@ def clean(*args):
   args = list(*args)
   for i,arg in enumerate(args):
     arg = str(arg)
-    while arg[-1] == '/':
+    while (len(arg) > 0) and (arg[-1] == '/'):
       if len(arg) == 1:
         break
       arg = arg[:-1]
@@ -165,7 +164,6 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     else:
       self.save = False
 
-
   def sort_local_dir(self):
     '''
     deal with mechanics of local_dir
@@ -183,7 +181,11 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     '''
     # consider possible cache files
     # some will be readable, some writeable
-    local_files = ListPath([l.joinpath(self.components[2][1:]).absolute()
+    components = self.components[2]
+
+    if len(components) and (components[0] == '/'):
+      components = components[1:]
+    local_files = ListPath([l.joinpath(components).absolute()
                             for l in self.local_dir])
 
     try:
@@ -320,6 +322,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     if (not data) and (self.pwr is not None): 
       # try pwr mode
       data = self.get_data_with_login()
+    self.get_links(data)
     return data
 
   def read_bytes(self):
@@ -336,7 +339,49 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     '''
     if self.binary:
       self.init(binary=False)
-    return self.read()
+    data = self.read()
+    self.get_links(data)
+    return data
+
+  def is_html(self,data):
+    '''
+    True if data is html
+    '''
+    start = '<!DOCTYPE HTML'
+    len_start = len(start)
+
+    if (len(data) < len_start):
+      return False
+    if (type(data) != str):
+      return False
+    if (data[:len_start] == start):
+      return True
+    return False
+
+  def get_links(self,data,force=False):
+    '''
+    if the type is httpd/unix-directory or
+    text/html, then set self.links to any relative links
+    found in the file
+    '''
+    if ('links' in self.__dict__) and (not force):
+      return self.links
+    
+    self.links = []
+    if not self.is_html(data):
+      return self.links
+
+    # get relative links (filter out those that start ?
+    # or http
+    if (type(data) is str) or ((self.content_type == 'httpd/unix-directory') or \
+       (self.content_type.split(';')[0] == 'text/html')):
+      links = np.array([mylink.attrs['href'] \
+         for mylink in BeautifulSoup(data,'lxml').find_all('a')])
+      self.links = [str(l).rstrip('/#') for l in links \
+                    if ((l[0] != '?') and (l[:len('http')] != 'http'))]
+      self.msg(f'found {len(self.links)} links')
+      self.links = [URL(self,i,pwr=self.pwr,cache=self.cache,binary=True) for i in self.links]
+    return self.links
 
   def read(self):
     '''
@@ -345,7 +390,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     renew = False
     data = None
 
-    if self.cache and self.readable:
+    if self.cache and self.readable and self.local_file.is_file():
       # look in cache for file
       self.msg(f"looking in cache {self.local_file.as_posix()}")
       if self.binary:
@@ -365,6 +410,7 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
       self.write(data,local=True)
 
     if data:
+      self.get_links(data)
       self.msg("done")
     return data
 
@@ -378,6 +424,20 @@ class URL(urlpath.URL,urllib.parse._NetlocResultMixinStr, PurePath):
     if ('local_file_write' not in self.__dict__) and (ofile == None):
       self.msg(f'cannot write: no ofile or cache (local_dir) defined')
       return ''
+
+    if self.cache and self.local_file_write.is_dir():
+        # cant use as cache
+        if (self.content_type == 'httpd/unix-directory') or \
+           (self.content_type.split(';')[0] == 'text/html'):
+          if len(self.components[2]) == 0:
+            # maybe it should be index.html??
+            try_file = Path(self.local_file_write,"index.html")
+            self.binary = False
+            self.local_file_write = Path(self.local_file_write,"index.html")
+          elif (self.suffix != ".html") and \
+             (self.suffix != ".htm"):
+            self.local_file_write = Path(self.local_file_write,"index.html")
+          self.update()
 
     if ofile is None:
       ofile = self.local_file_write
@@ -550,6 +610,48 @@ def main():
   data = url.read_text()
   assert len(data) == 200239
   print('passed 5')
+
+  print('test 6: multi-level, no cache, password required, read html')
+  u='https://e4ftl01.cr.usgs.gov/'
+  url = URL(u,pwr=True)
+  data = url.read_text()
+  print(url)
+  # read next level
+  data = url.links[5].read()
+  print(url.links[5])
+  # next level
+  data = url.links[5].links[1].read()
+  print(url.links[5].links[1])
+  # next level
+  data = url.links[5].links[1].links[1].read()
+  print(url.links[5].links[1].links[1])
+  # next level ... now a jpg file
+  data = url.links[5].links[1].links[1].links[1].read() 
+  print(url.links[5].links[1].links[1].links[1])
+  assert len(data) == 15718
+  print('passed 6')
+
+  print('test 7: multi-level, with cache, password required, read html')
+  u='https://e4ftl01.cr.usgs.gov/'
+  url = URL(u,pwr=True,cache=True)
+  data = url.read_text()
+  print(url)
+  # read next level
+  data = url.links[5].read()
+  print(url.links[5])
+  # next level
+  data = url.links[5].links[1].read()
+  print(url.links[5].links[1])
+  # next level
+  data = url.links[5].links[1].links[1].read()
+  print(url.links[5].links[1].links[1])
+  # next level ... now a jpg file
+  data = url.links[5].links[1].links[1].links[1].read()  
+  print(url.links[5].links[1].links[1].links[1])
+  assert len(data) == 15718
+  print('passed 7')
+
+
 
 
 if __name__ == "__main__":
